@@ -8,6 +8,10 @@ Current functionality:
 
 This boilerplate will expand as we determine use cases for additional endpoints.
 
+Swagger docs
+
+https://public.advisor.definitive.io/v0/docs#/
+
 ---
 
 # Quick Start
@@ -52,3 +56,7 @@ Execute sql and read results:
 (ie. daily -> select * from table where date_key = execution_date)
 - Create a target destination to write the data coming from the API (warehouse/DB of choice)
 - Dataframes are a good method of loading the data into the destination given pandas flexibility
+
+# Additional Considerations
+
+The returned results are limited to 20000 rows within the dataframe.

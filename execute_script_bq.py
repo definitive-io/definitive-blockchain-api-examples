@@ -9,18 +9,18 @@ import json
 from typing import List
 
 # Your API Key
-api_key = "my_key"
+api_key = ""
 
 # The headers for your requests
 headers = {
-    "Authorization": f"{api_key}",
+    "Authorization": f"Bearer {api_key}",
     "Content-Type": "application/json"
 }
 
 # Base URL of your API
-base_url = ""
+base_url = "https://public.advisor.definitive.io/v0"
 
-sql_path = os.path.join('./', 'sql/daily')
+sql_path = os.path.join('./', 'sql/ethereum_v1_0_x/daily')
 
 
 def get_scripts(
@@ -45,6 +45,7 @@ def get_scripts(
             with open(script) as f:
                 model_dict = {
                     "name": script.split("/")[-1].split(".")[0],
+                    "dataset": script.split("/")[2],
                     "script": f.read(),
                 }
                 models.append(model_dict)
@@ -57,104 +58,33 @@ def get_scripts(
     return models
 
 
-def bq_to_pd_dtype(
-        bq_type: str
-    ) -> str:
-    """
-    Convert BigQuery data type to pandas data type.
-    
-    Args:
-    bq_type (str): BigQuery data type.
-    
-    Returns:
-    str: Equivalent pandas data type.
-    """
-    bq_to_pd = {
-        'INT64': 'Int64',
-        'INTEGER': 'Int64',
-        'FLOAT64': 'float64',
-        'FLOAT': 'float64',
-        'NUMERIC': 'float64',
-        'BOOLEAN': 'bool',
-        'BOOL': 'bool',
-        'STRING': 'object',
-        'TEXT': 'object',
-        'BYTES': 'object',
-        'DATETIME': 'datetime64[ns]',
-        'DATE': 'datetime64[ns]',
-        'TIMESTAMP': 'datetime64[ns]',
-        'TIME': 'object',
-        'GEOGRAPHY': 'object',
-        'ARRAY': 'object',
-        'STRUCT': 'object',
-    }
-    
-    return bq_to_pd.get(bq_type.upper(), 'object')
-
-
 def normalize_response(
         response: dict
     ) -> pd.DataFrame():
     """
     Normalizes the response from the API into a DataFrame. 
     This is specific to how advisor-api returns the query result.
-    Result format:
-    {
-        "schema": {
-            "fields": [
-                {
-                    "name": "column_1_name",
-                    "type": "column_1_type",
-                    "mode": "column_1_mode"
-                },
-                ...
-                {
-                    "name": "column_x_name",
-                    "type": "column_x_type",
-                    "mode": "column_x_mode"
-                }
-            ]
-        "rows": [
-            [
-                "column_1_value",
-                ...
-                "column_x_value"
-            ]
-        ]
-        }
-    }
 
     Args:
     response (dict): Response from the API.
 
     Returns:
-    DataFrame: Normalized DataFrame.
+    DataFrame.
     """
-    # Get the schema
-    columns = []
-    schema = response['schema']['fields']
 
-    for field in schema:
-        columns.append(
-            {
-                'name': field['name'],
-                'type': bq_to_pd_dtype(field['type']),
-            }
+    if response['result']['type'] == 'dataframe':
+
+        df = pd.DataFrame(
+            response['result']['dataframe']['data'],
+            columns=response['result']['dataframe']['columns']
         )
-
-    # create a dataframe with the column names
-    rows = response['rows']
-    df = pd.DataFrame(rows, columns=[col['name'] for col in columns])
-
-    # set the data types for each column
-    for col in columns:
-        df[col['name']] = df[col['name']].astype(col['type'])
 
     return df
 
 
 def execute_sql(
-        sql: str
+        sql: str,
+        dataset: str
     ) -> str:
     """
     Calls advisor-api to execute a SQL query and returns the job ID.
@@ -168,16 +98,29 @@ def execute_sql(
     """
     # Prepare the payload
     payload = {
-        "query": sql
+        "query": {
+            "type": "sql",
+            "sql": sql,
+        },
+        "dataset": {
+            "type": "warehouse",
+            "id": dataset,
+        }
     }
 
     # Send the request
-    response = requests.post(f"{base_url}/execute-sql", headers=headers, json=payload)
+    response = requests.post(f"{base_url}/datasets/execute", headers=headers, json=payload)
 
     # Make sure the request was successful
     if response.status_code == 200:
         data = response.json()
-        return data['jobReference']['jobId']
+        logging.info(data)
+
+        return data['job_id']
+
+    elif response.status_code == 200 and response.json()['status'].lower() == 'pending':
+        logging.info("Request successful but job is still pending. Retrying...")
+
     else:
         logging.error(f"Request failed with status code {response.status_code}")
         return None
@@ -197,14 +140,14 @@ def poll_job(
     dict: Response from the API.
     """
     # Send the request
-    response = requests.get(f"{base_url}/execute-sql/{job_id}/poll", headers=headers)
+    response = requests.get(f"{base_url}/datasets/execute/{job_id}", headers=headers)
 
     # Make sure the request was successful
-    if response.status_code == 200:
+    if response.status_code == 200 and response.json()['status'].lower() == 'completed':
         data = response.json()
         return data
     else:
-        logging.error(f"Request failed with status code {response.status_code}")
+        logging.error(f"Request incomplete with status code {response.status_code} and response status {response.json()['status']}.")
         return None
 
 
@@ -234,7 +177,8 @@ def poll_job_until_complete(
 
 
 def run_query(
-        sql: str
+        sql: str,
+        dataset: str
     ) -> pd.DataFrame():
     """
     Executes a SQL query and returns the result as a DataFrame.
@@ -246,7 +190,7 @@ def run_query(
     Returns:
     DataFrame: Result of the query.
     """
-    job_id = execute_sql(sql)
+    job_id = execute_sql(sql, dataset)
 
     if job_id is not None:
         result = poll_job_until_complete(job_id)
@@ -268,7 +212,6 @@ def run_query(
 models = get_scripts(sql_path)
 
 for model in models:
-    df = run_query(model['script'])
+    df = run_query(model['script'], model['dataset'])
 
-    print(df)
     logging.info(df)
