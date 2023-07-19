@@ -72,12 +72,7 @@ def normalize_response(
     DataFrame.
     """
 
-    if response['result']['type'] == 'dataframe':
-
-        df = pd.DataFrame(
-            response['result']['dataframe']['data'],
-            columns=response['result']['dataframe']['columns']
-        )
+    df = pd.DataFrame(**response)
 
     return df
 
@@ -105,24 +100,27 @@ def execute_sql(
         "dataset": {
             "type": "warehouse",
             "id": dataset,
-        }
+        },
+        "timeout": 0  # Set timeout to get results in one call. If not successful, poll job_id
     }
 
     # Send the request
     response = requests.post(f"{base_url}/datasets/execute", headers=headers, json=payload)
 
     # Make sure the request was successful
-    if response.status_code == 200:
-        data = response.json()
-        logging.info(data)
+    if response.status_code == 200 and response.json()['status'].lower() == 'completed':
+        logging.info(response.json()['result'])
 
-        return data['job_id']
+        return response.json()['result']
 
-    elif response.status_code == 200 and response.json()['status'].lower() == 'pending':
-        logging.info("Request successful but job is still pending. Retrying...")
+    elif response.status_code == 200 and response.json()['status'].lower() != 'completed':
+        logging.info(f"Request successful but job is still pending. Job ID: {response.json()['job_id']}")
+
+        return response.json()
 
     else:
         logging.error(f"Request failed with status code {response.status_code}")
+
         return None
 
 
@@ -144,8 +142,9 @@ def poll_job(
 
     # Make sure the request was successful
     if response.status_code == 200 and response.json()['status'].lower() == 'completed':
-        data = response.json()
+        data = response.json()['result']
         return data
+
     else:
         logging.error(f"Request incomplete with status code {response.status_code} and response status {response.json()['status']}.")
         return None
@@ -190,22 +189,36 @@ def run_query(
     Returns:
     DataFrame: Result of the query.
     """
-    job_id = execute_sql(sql, dataset)
+    result = execute_sql(sql, dataset)
+    df = None
 
-    if job_id is not None:
-        result = poll_job_until_complete(job_id)
+    if result is not None:
+
+        # If response did not contain result on execute, poll results using job_id
+        if 'job_id' in result:
+            data = poll_job_until_complete(result['job_id'])
         
-        if result is not None:
-            
-            # Transform the result into a DataFrame
-            df = normalize_response(result)
-            return df
+            if data is not None and data['type'] == 'dataframe':
+                # Transform the result into a DataFrame
+                df = normalize_response(data['dataframe'])
+            else:
+                logging.error("Job result is not valid.")
+
+        elif 'type' in result :
+            if result['type'] == 'dataframe':
+                df = normalize_response(result['dataframe'])
+
+            else:
+                logging.error(f"Result type {result['type']} not yet supported.")
+
         else:
             logging.error("Job did not complete successfully.")
-            return None
+
     else:
         logging.error("Job execution did not start successfully.")
-        return None
+
+    return df
+
 
 
 # Execution entry point
@@ -214,4 +227,6 @@ models = get_scripts(sql_path)
 for model in models:
     df = run_query(model['script'], model['dataset'])
 
+    # Verify dataframe results
+    print(df)
     logging.info(df)
